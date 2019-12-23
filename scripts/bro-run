@@ -46,7 +46,7 @@ sync
 
 before_bro
 
-/usr/local/bro/bin/broctl deploy & echo $! > /firewalla/bro.pid
+ZEEK_DEFAULT_LISTEN_ADDRESS=127.0.0.1 /usr/local/bro/bin/broctl deploy
 logger "FIREWALLA: Deployed BRO using BROCTL"
 sudo cp /home/pi/firewalla/etc/sysctl.conf /etc/sysctl.conf
 sudo sysctl -p
