@@ -7,3 +7,7 @@ fi
 if [[ -f /usr/local/bro/share/bro/base/frameworks/communication/main.bro ]]; then
     sed -i 's/#redef Communication::listen_interface = 127.0.0.1;/redef Communication::listen_interface = 127.0.0.1;/' /home/pi/firewalla/etc/local.bro # uncomment Communication if file exists
 fi
+
+if [[ -f /usr/local/bro/share/bro/policy/misc/app-stats/main.bro ]]; then
+    sed -i 's=#@load misc/app-stats=@load misc/app-stats=' /home/pi/firewalla/etc/local.bro # uncomment app-stats if file exists
+fi

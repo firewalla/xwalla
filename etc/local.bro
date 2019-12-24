@@ -19,7 +19,7 @@ redef SSL::disable_analyzer_after_detection = F;
 
 # Log some information about web applications being used by users 
 # on your network.
-@load misc/app-stats
+#@load misc/app-stats
 
 # Detect traceroute being run on the network.  
 @load misc/detect-traceroute
@@ -98,6 +98,6 @@ redef SSL::disable_analyzer_after_detection = F;
 redef restrict_filters += [["not-mdns"] = "not port 5353"];
 
 redef SSL::disable_analyzer_after_detection = F;
-redef Communication::listen_interface = 127.0.0.1;
+#redef Communication::listen_interface = 127.0.0.1;
 
 @load base/protocols/dhcp
