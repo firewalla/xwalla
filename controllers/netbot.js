@@ -379,6 +379,7 @@ class netBot extends ControllerBot {
     this.hostManager.loadPolicy((err, data) => { });  //load policy
 
     this.networkProfileManager = require('../net2/NetworkProfileManager.js');
+    this.tagManager = require('../net2/TagManager.js');
 
     // no subscription for api mode
     if (apiMode) {
@@ -883,12 +884,21 @@ class netBot extends ControllerBot {
                     await network.setPolicy(o, policyData);
                   }
                 } else {
-                  let host = await this.hostManager.getHostAsync(target)
-                  if (host) {
-                    await host.loadPolicyAsync()
-                    await host.setPolicyAsync(o, policyData)
+                  if (target.startsWith("tag:")) {
+                    const tagUid = target.substring(4);
+                    const tag = await this.tagManager.getTagByUid(tagUid);
+                    if (tag) {
+                      await tag.loadPolicy();
+                      await tag.setPolicy(o, policyData)
+                    }
                   } else {
-                    throw new Error('Invalid host')
+                    let host = await this.hostManager.getHostAsync(target)
+                    if (host) {
+                      await host.loadPolicyAsync()
+                      await host.setPolicyAsync(o, policyData)
+                    } else {
+                      throw new Error('Invalid host')
+                    }
                   }
                 }
               }
@@ -924,25 +934,18 @@ class netBot extends ControllerBot {
           if (hostTool.isMacAddress(msg.target)) {
             const macAddress = msg.target
             log.info("set host name alias by mac address", macAddress);
-
             let macObject = {
               mac: macAddress,
-              name: data.value.name,
+              name: data.value.name
             }
-
             await hostTool.updateMACKey(macObject, true);
-            const host = await this.hostManager.getHostAsync(macAddress);
-            const pureHost = host.o || {};
+            await hostTool.generateLocalDomain(macAddress);
             sem.emitEvent({
-              type: "DeviceUpdate",
-              message: "Update device name",
-              host: {
-                ipv4Addr: pureHost.ipv4Addr,
-                mac: macAddress,
-                name: data.value.name
-              },
+              type: "LocalDomainUpdate",
+              message: `Update device:${macAddress} localDomain`,
+              macArr: [macAddress],
               toProcess: 'FireMain'
-            })
+            });
             this.simpleTxData(msg, {}, null, callback)
             return
 
@@ -989,18 +992,13 @@ class netBot extends ControllerBot {
               customizeDomainName: customizeDomainName ? customizeDomainName : ''
             }
             await hostTool.updateMACKey(macObject, true);
-            const host = await this.hostManager.getHostAsync(macAddress);
-            const pureHost = host.o || {};
+            await hostTool.generateLocalDomain(macAddress);
             sem.emitEvent({
-              type: "DeviceUpdate",
-              message: "customize domain name",
-              host: {
-                ipv4Addr: pureHost.ipv4Addr,
-                mac: macAddress,
-                customizeDomainName: customizeDomainName
-              },
+              type: "LocalDomainUpdate",
+              message: `Update device:${macAddress} userLocalDomain`,
+              macArr: [macAddress],
               toProcess: 'FireMain'
-            })
+            });
             this.simpleTxData(msg, {}, null, callback)
           } else {
             this.simpleTxData(msg, {}, new Error("Invalid mac address"), callback);
@@ -1279,12 +1277,13 @@ class netBot extends ControllerBot {
             if (vpnConfig && vpnConfig.externalPort)
               externalPort = vpnConfig.externalPort;
             VpnManager.configureClient("fishboneVPN1", null).then(() => {
-              VpnManager.getOvpnFile("fishboneVPN1", null, regenerate, externalPort, (err, ovpnfile, password) => {
+              VpnManager.getOvpnFile("fishboneVPN1", null, regenerate, externalPort, (err, ovpnfile, password, timestamp) => {
                 if (err == null) {
                   datamodel.data = {
                     ovpnfile: ovpnfile,
                     password: password,
-                    portmapped: JSON.parse(data['vpnPortmapped'] || "false")
+                    portmapped: JSON.parse(data['vpnPortmapped'] || "false"),
+                    timestamp: timestamp
                   };
                   (async () => {
                     const doublenat = await rclient.getAsync("ext.doublenat");
@@ -2252,6 +2251,35 @@ class netBot extends ControllerBot {
         }, null, callback)
         break;
       }
+      case "tag:create": {
+        (async () => {
+          if (!value || !value.name)
+            this.simpleTxData(msg, {}, {code: 400, msg: "'name' is not specified."}, callback);
+          else {
+            const name = value.name;
+            const obj = value.obj;
+            const tag = await this.tagManager.createTag(name, obj);
+            this.simpleTxData(msg, tag, null, callback);
+          }
+        })().catch((err) => {
+          this.simpleTxData(msg, {}, err, callback);
+        })
+        break;
+      }
+      case "tag:remove": {
+        (async () => {
+          if (!value || !value.name)
+            this.simpleTxData(msg, {}, {code: 400, msg: "'name' is not specified"}, callback);
+          else {
+            const name = value.name;
+            await this.tagManager.removeTag(name);
+            this.simpleTxData(msg, {}, null, callback);
+          }
+        })().catch((err) => {
+          this.simpleTxData(msg, {}, err, callback);
+        })
+        break;
+      }
       case "alarm:block":
         am2.blockFromAlarm(value.alarmID, value, (err, policy, otherBlockedAlarms, alreadyExists) => {
           if (value && value.matchAll) { // only block other matched alarms if this option is on, for better backward compatibility
@@ -2900,9 +2928,9 @@ class netBot extends ControllerBot {
             if (vpnConfig && vpnConfig.externalPort)
               externalPort = vpnConfig.externalPort;
             await VpnManager.configureClient(cn, settings).then(() => {
-              VpnManager.getOvpnFile(cn, null, regenerate, externalPort, (err, ovpnfile, password) => {
+              VpnManager.getOvpnFile(cn, null, regenerate, externalPort, (err, ovpnfile, password, timestamp) => {
                 if (!err) {
-                  this.simpleTxData(msg, { ovpnfile: ovpnfile, password: password, settings: settings }, null, callback);
+                  this.simpleTxData(msg, { ovpnfile: ovpnfile, password: password, settings: settings, timestamp }, null, callback);
                 } else {
                   this.simpleTxData(msg, null, err, callback);
                 }
@@ -2948,9 +2976,9 @@ class netBot extends ControllerBot {
           let externalPort = "1194";
           if (vpnConfig && vpnConfig.externalPort)
             externalPort = vpnConfig.externalPort;
-          VpnManager.getOvpnFile(cn, null, false, externalPort, (err, ovpnfile, password) => {
+          VpnManager.getOvpnFile(cn, null, false, externalPort, (err, ovpnfile, password, timestamp) => {
             if (!err) {
-              this.simpleTxData(msg, { ovpnfile: ovpnfile, password: password, settings: settings }, null, callback);
+              this.simpleTxData(msg, { ovpnfile: ovpnfile, password: password, settings: settings, timestamp }, null, callback);
             } else {
               this.simpleTxData(msg, null, err, callback);
             }
@@ -2967,7 +2995,8 @@ class netBot extends ControllerBot {
           const vpnProfiles = [];
           for (let cn in allSettings) {
             // special handling for common name starting with fishboneVPN1
-            vpnProfiles.push({ cn: cn, settings: allSettings[cn], connections: statistics && statistics.clients && Array.isArray(statistics.clients) && statistics.clients.filter(c => (cn === "fishboneVPN1" && c.cn.startsWith(cn)) || c.cn === cn) || [] });
+            const timestamp = await VpnManager.getVpnConfigureTimestamp(cn);
+            vpnProfiles.push({ cn: cn, settings: allSettings[cn], connections: statistics && statistics.clients && Array.isArray(statistics.clients) && statistics.clients.filter(c => (cn === "fishboneVPN1" && c.cn.startsWith(cn)) || c.cn === cn) || [], timestamp: timestamp});
           }
           this.simpleTxData(msg, vpnProfiles, null, callback);
         })().catch((err) => {
