@@ -25,10 +25,10 @@ const sysManager = require('./SysManager.js');
 
 const platform = require('../platform/PlatformLoader.js').getPlatform();
 
-const networkTool = require('./NetworkTool.js')();
 const util = require('util');
 
 const Config = require('./config.js');
+const firerouter = require('./FireRouter.js');
 
 const uuid = require('uuid')
 const _ = require('lodash')
@@ -89,11 +89,11 @@ module.exports = class {
   }
 
   async discoverMac(mac) {
-    await this.discoverInterfacesAsync()
-    log.info("Discovery::DiscoverMAC", this.config.discovery.networkInterfaces);
+    await this.discoverInterfacesAsync();
+    const list = sysManager.getMonitoringInterfaces();
+    log.info("Discovery::DiscoverMAC", list);
     let found = null;
-    for (const name of this.config.discovery.networkInterfaces) {
-      let intf = this.interfaces[name];
+    for (const intf of list) {
       if (intf == null) {
         continue;
       }
@@ -188,7 +188,14 @@ module.exports = class {
 
   async discoverInterfacesAsync() {
     this.interfaces = {};
-    const list = await networkTool.listInterfaces();
+    let list = [];
+    if (!platform.isFireRouterManaged())
+      list = await networkTool.listInterfaces();
+    else {
+      // firerouter.init should return quickly
+      await firerouter.init();
+      list = await firerouter.getSysNetworkInfo();
+    }
     if (!list.length) {
       log.warn('No interface')
       return
@@ -210,12 +217,9 @@ module.exports = class {
     }
 
     let redisobjs = ['sys:network:info'];
-    for (let i in list) {
-      log.debug(list[i]);
-
-      redisobjs.push(list[i].name);
-      this.interfaces[list[i].name] = list[i];
-      redisobjs.push(JSON.stringify(list[i]));
+    for (const intf of list) {
+      redisobjs.push(intf.name);
+      redisobjs.push(JSON.stringify(intf));
 
       /*
       {
@@ -227,16 +231,16 @@ module.exports = class {
         "subnet":"192.168.2.0/24"
       }
       */
-      if (list[i].type == "Wired" && !list[i].name.endsWith(':0')) {
+      if (intf.type == "Wired" && !intf.name.endsWith(':0')) {
         sem.emitEvent({
           type: "DeviceUpdate",
           message: "Firewalla self discovery",
           host: {
             name: "Firewalla",
-            uid: list[i].ip_address,
-            mac: list[i].mac_address.toUpperCase(),
-            ipv4Addr: list[i].ip_address,
-            ipv6Addr: list[i].ip6_addresses || JSON.stringify([]),
+            uid: intf.ip_address,
+            mac: intf.mac_address.toUpperCase(),
+            ipv4Addr: intf.ip_address,
+            ipv6Addr: intf.ip6_addresses || JSON.stringify([]),
             macVendor: "Firewalla",
             from: "Discovery"
           },
