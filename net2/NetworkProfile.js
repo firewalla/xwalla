@@ -30,22 +30,30 @@ const Promise = require('bluebird');
 Promise.promisifyAll(fs);
 const Dnsmasq = require('../extension/dnsmasq/dnsmasq.js');
 const dnsmasq = new Dnsmasq();
+const Mode = require('./Mode.js');
+const SpooferManager = require('./SpooferManager.js');
+const instances = {}; // this instances cache can ensure that NetworkProfile object for each uuid will be created only once. 
+                      // it is necessary because each object will subscribe NetworkPolicy:Changed message.
+                      // this can guarantee the event handler function is run on the correct and unique object.
 
 class NetworkProfile {
   constructor(o) {
-    this.o = o;
-    this._policy = {};
-    const c = require('./MessageBus.js');
-    this.subscriber = new c("info");
-    if (f.isMain()) {
-      if (o && o.uuid) {
-        this.subscriber.subscribeOnce("DiscoveryEvent", "NetworkPolicy:Changed", this.o.uuid, (channel, type, id, obj) => {
-          log.info(`Network policy is changed on ${this.o.intf}, uuid: ${this.o.uuid}`, obj);
-          this.applyPolicy();
-        })
+    if (!instances[o.uuid]) {
+      this.o = o;
+      this._policy = {};
+      const c = require('./MessageBus.js');
+      this.subscriber = new c("info");
+      if (f.isMain()) {
+        if (o && o.uuid) {
+          this.subscriber.subscribeOnce("DiscoveryEvent", "NetworkPolicy:Changed", this.o.uuid, (channel, type, id, obj) => {
+            log.info(`Network policy is changed on ${this.o.intf}, uuid: ${this.o.uuid}`, obj);
+            this.applyPolicy();
+          });
+        }
       }
+      instances[o.uuid] = this;
     }
-    return this;
+    return instances[o.uuid];
   }
 
   update(o) {
@@ -104,14 +112,36 @@ class NetworkProfile {
 
   // This actually incidates monitoring state. Old glossary used in PolicyManager.js
   async spoof(state) {
+    const spoofModeOn = await Mode.isSpoofModeOn();
+    const sm = new SpooferManager();
     if (state === true) {
       await iptables.switchInterfaceMonitoringAsync(true, this.o.intf);
       await ip6tables.switchInterfaceMonitoringAsync(true, this.o.intf);
+      if (spoofModeOn && this.o.type === "wan") { // only spoof on wan interface
+        if (this.o.gateway  && this.o.gateway.length > 0 
+          && this.o.ipv4 && this.o.ipv4.length > 0
+          && this.o.gateway !== this.o.ipv4) {
+          await sm.registerSpoofInstance(this.o.intf, this.o.gateway, this.o.ipv4, false);
+        }
+        if (this.o.gateway6 && this.o.gateway6.length > 0 
+          && this.o.ipv6 && this.o.ipv6.length > 0 
+          && !this.o.ipv6.includes(this.o.gateway6)) {
+          await sm.registerSpoofInstance(this.o.intf, this.o.gateway6, this.o.ipv6[0], true);
+          // TODO: spoof gateway's other ipv6 addresses if it is also dns server
+        }
+      }
     } else {
       await iptables.switchInterfaceMonitoringAsync(false, this.o.intf);
       await ip6tables.switchInterfaceMonitoringAsync(false, this.o.intf);
+      if (spoofModeOn && this.o.type === "wan") { // only spoof on wan interface
+        if (this.o.gateway) {
+          await sm.deregisterSpoofInstance(this.o.intf, "*", false);
+        }
+        if (this.o.gateway6 && this.o.gateway6.length > 0) {
+          await sm.deregisterSpoofInstance(this.o.intf, "*", true);
+        }
+      }
     }
-    // TODO: not finished yet. Need to start/stop spoof instance on the interface
   }
 
   async vpnClient(policy) {
@@ -125,26 +155,38 @@ class NetworkProfile {
   // underscore prefix? follow same function name in Host.js :(
   async _dnsmasq(policy) {
     const dnsCaching = policy.dnsCaching;
+    const netIpsetName = NetworkProfile.getNetIpsetName(this.o.uuid);
+    if (!netIpsetName) {
+      log.error(`Failed to get net ipset name for ${this.o.uuid} ${this.o.name}`);
+      return;
+    }
     if (dnsCaching === true) {
-      
+      let cmd =  `sudo ipset del -! no_dns_caching_set ${netIpsetName}`;
+      await exec(cmd).catch((err) => {
+        log.error(`Failed to disable dns cache on ${netIpsetName} ${this.o.name}`, err);
+      });
+      cmd = `sudo ipset del -! no_dns_caching_set ${netIpsetName}6`;
+      await exec(cmd).catch((err) => {
+        log.error(`Failed to disable dns cache on ${netIpsetName}6 ${this.o.name}`, err);
+      });
     } else {
-
+      let cmd =  `sudo ipset add -! no_dns_caching_set ${netIpsetName}`;
+      await exec(cmd).catch((err) => {
+        log.error(`Failed to enable dns cache on ${netIpsetName} ${this.o.name}`, err);
+      });
+      cmd = `sudo ipset add -! no_dns_caching_set ${netIpsetName}6`;
+      await exec(cmd).catch((err) => {
+        log.error(`Failed to enable dns cache on ${netIpsetName}6 ${this.o.name}`, err);
+      });
     }
   }
 
   static getNetIpsetName(uuid) {
-    const networkProfile = require('./NetworkProfileManager.js').getNetworkProfile(uuid);
-    if (networkProfile) {
-      const iface = networkProfile.o.intf;
-      if (!iface || iface.length == 0) {
-        log.error(`Failed to get interface name of network ${uuid}`);
-        return null;
-      }
-      return `c_net_${networkProfile.o.intf}_set`;
-    } else {
-      log.warn(`Network ${uuid} not found`);
+    // TODO: need find a better way to get a unique name from uuid
+    if (uuid) {
+      return `c_net_${uuid.substring(0, 13)}_set`;
+    } else
       return null;
-    }
   }
 
   async createEnv() {
@@ -156,13 +198,16 @@ class NetworkProfile {
       await exec(`sudo ipset create -! ${netIpsetName} hash:net,iface maxelem 1024`).then(() => {
         return exec(`sudo ipset flush -! ${netIpsetName}`);
       }).then(() => {
-        if (this.o && this.o.ipv4 && this.o.ipv4.length != 0)
-          return exec(`sudo ipset add -! ${netIpsetName} ${this.o.ipv4},${this.o.intf}`);
+        if (this.o && this.o.ipv4Subnet && this.o.ipv4Subnet.length != 0)
+          return exec(`sudo ipset add -! ${netIpsetName} ${this.o.ipv4Subnet},${this.o.intf}`);
       }).catch((err) => {
         log.error(`Failed to create network profile ipset ${netIpsetName}`, err.message);
       });
-      await exec(`sudo ipset create -! ${netIpsetName}6 hash:net,iface family inet6 maxelem 1024`).then(() => {
-        // TODO: add ipv6 prefixes to ipset
+      await exec(`sudo ipset create -! ${netIpsetName}6 hash:net,iface family inet6 maxelem 1024`).then(async () => {
+        if (this.o && this.o.ipv6Subnets && this.o.ipv6Subnets.length != 0) {
+          for (const subnet6 of this.o.ipv6Subnets)
+            await exec(`sudo ipset add -! ${netIpsetName}6 ${subnet6},${this.o.intf}`).catch((err) => {});
+        }
       }).catch((err) => {
         log.error(`Failed to create network profile ipset ${netIpsetName}6`, err.message);
       });
@@ -185,6 +230,16 @@ class NetworkProfile {
       // delete related dnsmasq config files
       if (this.o.intf)
         await exec(`sudo rm -f ${f.getUserConfigFolder()}/dnsmasq/${this.o.intf}/*`).catch((err) => {});
+    }
+    this.oper = null; // clear oper cache used in PolicyManager.js
+    // disable spoof instances
+    const sm = new SpooferManager();
+    // use wildcard to deregister all spoof instances on this interface
+    if (this.o.gateway) {
+      await sm.deregisterSpoofInstance(this.o.intf, "*", false);
+    }
+    if (this.o.gateway6 && this.o.gateway6.length > 0) {
+      await sm.deregisterSpoofInstance(this.o.intf, "*", true);
     }
   }
 
@@ -231,7 +286,7 @@ class NetworkProfile {
       }
     }
     this._tags = updatedTags;
-    this.setPolicy("tags", this._tags); // keep tags in policy data up-to-date
+    await this.setPolicy("tags", this._tags); // keep tags in policy data up-to-date
     await dnsmasq.restartDnsmasq();
   }
 }

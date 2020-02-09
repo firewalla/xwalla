@@ -41,6 +41,7 @@ const sss = require('../extension/sysinfo/SysInfo.js');
 const Config = require('./config.js');
 
 const fireRouter = require('./FireRouter.js')
+const Message = require('./Message.js');
 
 const { Address4, Address6 } = require('ip-address')
 
@@ -116,8 +117,12 @@ class SysManager {
             });
             break;
           }
-          case "System:IPChange":
-            this.update(null);
+          case Message.MSG_SYS_NETWORK_INFO_UPDATED:
+            this.update(async () => {
+              if (f.isMain()) {
+                await pclient.publishAsync(Message.MSG_SYS_NETWORK_INFO_RELOADED, "");
+              }
+            });
             break;
         }
       });
@@ -126,7 +131,7 @@ class SysManager {
       sclient.subscribe("System:TimezoneChange");
       sclient.subscribe("System:Upgrade:Hard");
       sclient.subscribe("System:SSHPasswordChange");
-      sclient.subscribe("System:IPChange");
+      sclient.subscribe(Message.MSG_SYS_NETWORK_INFO_UPDATED);
 
       this.delayedActions();
 
@@ -454,16 +459,6 @@ class SysManager {
     });
   }
 
-  async getLanConfigurations() {
-    return rclient.hgetAsync("sys:network:settings", "lans").then((value) => {
-      if (value)
-        return JSON.parse(value);
-      else return null;
-    }).catch((err) => {
-      return null;
-    });
-  }
-
   async clearVersionUpdate() {
     return rclient.delAsync("sys:versionUpdate");
   }
@@ -499,6 +494,10 @@ class SysManager {
     return this.getMonitoringInterfaces().find(i => ipAddress.isInSubnet(i.subnetAddress4))
   }
 
+  getInterfaceViaIP6(ip6) {
+    return this.getMonitoringInterfaces().find(i => i.name && this.inMySubnet6(ip6, i.name))
+  }
+
   // this method is not safe as we'll have interfaces with same mac
   // getInterfaceViaMac(mac) {
   //   return this.macMap && this.macMap[mac.toLowerCase()]
@@ -531,6 +530,12 @@ class SysManager {
     }
   }
 
+  myDefaultWanIp() {
+    const wanIntf = fireRouter.getDefaultWanIntfName();
+    if (wanIntf)
+      return this.myIp(wanIntf);
+    return null;
+  }
 
   myIp(intf = this.config.monitoringInterface) {
     return this.getInterface(intf) && this.getInterface(intf).ip_address;
@@ -683,7 +688,7 @@ class SysManager {
 
     let interfaces = this.getMonitoringInterfaces();
     if (intf) {
-      interfaces = interfaces.filter(i => i.name.startsWith(intf + ':'))
+      interfaces = interfaces.filter(i => i.name === intf)
     }
 
     return interfaces
@@ -699,7 +704,7 @@ class SysManager {
     else {
       let interfaces = this.getMonitoringInterfaces();
       if (intf) {
-        interfaces = interfaces.filter(i => i.name.startsWith(intf + ':'))
+        interfaces = interfaces.filter(i => i.name === intf)
       }
 
       return interfaces

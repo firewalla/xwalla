@@ -20,9 +20,11 @@ var instances = {};
 const sem = require('../sensor/SensorEventManager.js').getInstance();
 
 const rclient = require('../util/redis_manager.js').getRedisClient()
+const pclient = require('../util/redis_manager.js').getPublishClient();
 
 const sysManager = require('./SysManager.js');
 
+const networkTool = require('./NetworkTool.js')();
 const platform = require('../platform/PlatformLoader.js').getPlatform();
 
 const util = require('util');
@@ -32,6 +34,7 @@ const firerouter = require('./FireRouter.js');
 
 const uuid = require('uuid')
 const _ = require('lodash')
+const Message = require('./Message.js');
 
 /*
  *   config.discovery.networkInterfaces : list of interfaces
@@ -89,7 +92,7 @@ module.exports = class {
   }
 
   async discoverMac(mac) {
-    await this.discoverInterfacesAsync();
+    await this.discoverInterfacesAsync(false);
     const list = sysManager.getMonitoringInterfaces();
     log.info("Discovery::DiscoverMAC", list);
     let found = null;
@@ -186,7 +189,7 @@ module.exports = class {
       .catch(err => callback(err))
   }
 
-  async discoverInterfacesAsync() {
+  async discoverInterfacesAsync(publishUpdate = true) {
     this.interfaces = {};
     let list = [];
     if (!platform.isFireRouterManaged())
@@ -205,7 +208,13 @@ module.exports = class {
     if (!platform.isFireRouterManaged()) {
       const uuidIntf = await rclient.hgetallAsync('sys:network:uuid');
       for (const intf of list) {
-        let uuidAssigned = _.findKey(uuidIntf, i => i.name == intf.name)
+        let uuidAssigned = _.findKey(uuidIntf, i => {
+          try {
+            const obj = JSON.parse(i);
+            return obj.name == intf.name
+          } catch (err) {}
+          return false;
+        });
         if (!uuidAssigned) {
           uuidAssigned = uuid.v4()
           intf.uuid = uuidAssigned
@@ -226,12 +235,13 @@ module.exports = class {
         "name":"eth0",
         "ip_address":"192.168.2.225",
         "mac_address":"b8:27:eb:bd:54:da",
-        "type":"Wired",
+        "conn_type":"Wired",
         "gateway":"192.168.2.1",
-        "subnet":"192.168.2.0/24"
+        "subnet":"192.168.2.0/24",
+        "type": "wan"
       }
       */
-      if (intf.type == "Wired" && !intf.name.endsWith(':0')) {
+      if (intf.conn_type == "Wired" && !intf.name.endsWith(':0')) {
         sem.emitEvent({
           type: "DeviceUpdate",
           message: "Firewalla self discovery",
@@ -257,7 +267,8 @@ module.exports = class {
     } catch (error) {
       log.error("Discovery::Interfaces:Error", redisobjs, list, error);
     }
-
+    if (publishUpdate)
+      await pclient.publishAsync(Message.MSG_SYS_NETWORK_INFO_UPDATED, "");
     return list
   }
 
