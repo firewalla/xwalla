@@ -168,7 +168,7 @@ class NmapSensor extends Sensor {
   }
 
   getNetworkRanges() {
-    return this.interfaces && this.interfaces.map((x) => {
+    return this.interfaces && this.interfaces.filter(i => i.name && !i.name.includes("vpn")).map((x) => { // do not scan vpn interface
       return { range: networkTool.capSubnet(x.subnet), intf_mac: x.mac_address }
     })
   }
@@ -223,7 +223,7 @@ class NmapSensor extends Sensor {
       }
 
       let cmd = fastMode
-        ? util.format('sudo nmap -sn -PO --host-timeout 30s  %s -oX - | %s', range, xml2jsonBinary)
+        ? util.format('sudo nmap -sn -PO --send-ip --host-timeout 30s  %s -oX - | %s', range, xml2jsonBinary)
         : util.format('sudo nmap -sU --host-timeout 200s --script nbstat.nse -p 137 %s -oX - | %s', range, xml2jsonBinary);
 
       return NmapSensor.scan(cmd)
@@ -266,14 +266,17 @@ class NmapSensor extends Sensor {
         const intfName = intf.name;
         if (host.ipv4Addr && host.ipv4Addr === sysManager.myIp(intfName)) {
           host.mac = sysManager.myMAC(intfName)
+          break;
         } else if (host.ipv4Addr && host.ipv4Addr === sysManager.myWifiIp(intfName)) {
           host.mac = sysManager.myWifiMAC(intfName);
+          break;
         } else if (host.ipv4Addr && host.ipv4Addr === sysManager.myIp2(intfName)) {
           return // do nothing on secondary ip
-        } else {
-          log.error("Invalid MAC Address for host", host);
-          return
         }
+      }
+      if (!host.mac) {
+        log.warn("Unidentified MAC Address for host", host);
+        return
       }
     }
 

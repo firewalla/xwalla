@@ -474,6 +474,10 @@ class SysManager {
     });
   }
 
+  getLogicInterfaces() {
+    return fireRouter.getLogicIntfNames().map(name => this.sysinfo[name]);
+  }
+
   getMonitoringInterfaces() {
     return fireRouter.getMonitoringIntfNames().map(name => this.sysinfo[name])
   }
@@ -491,7 +495,7 @@ class SysManager {
 
   getInterfaceViaIP4(ip) {
     const ipAddress = new Address4(ip)
-    return this.getMonitoringInterfaces().find(i => ipAddress.isInSubnet(i.subnetAddress4))
+    return this.getMonitoringInterfaces().find(i => i.subnetAddress4 && ipAddress.isInSubnet(i.subnetAddress4))
   }
 
   getInterfaceViaIP6(ip6) {
@@ -542,6 +546,13 @@ class SysManager {
     if (wanIntf)
       return this.myGateway(wanIntf);
     return null;
+  }
+
+  myDefaultDns() {
+    const wanIntf = fireRouter.getDefaultWanIntfName();
+    if (wanIntf)
+      return this.myDNS(wanIntf);
+    return [];
   }
 
   myIp(intf = this.config.monitoringInterface) {
@@ -626,6 +637,17 @@ class SysManager {
       && this.getInterface(intf).mac_address.toUpperCase();
   }
 
+  myMACViaIP4(ip) {
+    const intf = this.getMonitoringInterfaces().find(i => i.ip_address === ip);
+    return intf && intf.mac_address && intf.mac_address.toUpperCase();
+  }
+
+  myMACViaIP6(ip) {
+    const intf = this.getMonitoringInterfaces().find(i => Array.isArray(i.ip6_addresses) && i.ip6_addresses.includes(ip));
+    return intf && intf.mac_address && intf.mac_address.toUpperCase();
+  }
+
+
   // DEPRECATING
   myWifiMAC() {
     if (this.monitoringWifiInterface() && this.monitoringWifiInterface().mac_address) {
@@ -699,7 +721,7 @@ class SysManager {
     }
 
     return interfaces
-      .map(i => ip4.isInSubnet(i.subnetAddress4))
+      .map(i => i.subnetAddress4 && ip4.isInSubnet(i.subnetAddress4))
       .some(Boolean)
   }
 
@@ -716,7 +738,7 @@ class SysManager {
 
       return interfaces
         .map(i => Array.isArray(i.ip6_subnets) &&
-          i.ip6_subnets.map(subnet => ip6.isInSubnet(new Address6(subnet))).some(Boolean)
+          i.ip6_subnets.map(subnet => !subnet.startsWith("fe80:") && ip6.isInSubnet(new Address6(subnet))).some(Boolean) // link local address is not accurate to determine subnet
         ).some(Boolean)
     }
   }

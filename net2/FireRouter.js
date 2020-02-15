@@ -147,7 +147,7 @@ async function generateNetworkInfo() {
       ip6_masks:    ip6Masks.length > 0 ? ip6Masks : null,
       gateway6:     gateway6,
       dns:          dns,
-      carrier:      intf.state && intf.state.carrier == 1,
+      // carrier:      intf.state && intf.state.carrier == 1, // need to find a better place to put this
       conn_type:    'Wired', // probably no need to keep this,
       type:         intf.config.meta.type
     }
@@ -164,7 +164,8 @@ async function generateNetworkInfo() {
 
 let routerInterface = null
 let routerConfig = null
-let monitoringIntfNames = null
+let monitoringIntfNames = [];
+let logicIntfNames = [];
 let wanIntfNames = null
 let defaultWanIntfName = null
 let intfNameMap = {}
@@ -224,9 +225,9 @@ class FireRouter {
 
       const mode = await rclient.getAsync('mode')
 
-      const lastConfig = await this.loadLastConfigFromHistory(mode);
+      const lastConfig = await this.loadLastConfigFromHistory();
       if (!lastConfig || ! _.isEqual(lastConfig.config, routerConfig)) {
-        await this.saveConfigHistory(routerConfig, mode);
+        await this.saveConfigHistory(routerConfig);
       }
 
       // const wans = await getWANInterfaces();
@@ -268,19 +269,25 @@ class FireRouter {
           // monitor both wan and lan in simple mode
           monitoringIntfNames = Object.values(intfNameMap)
             .filter(intf => intf.config.meta.type === 'wan' || intf.config.meta.type === 'lan')
-            .map(intf => intf.config.meta.intfName)
+            .filter(intf => intf.state && intf.state.ip4) // ignore interfaces without ip address, e.g., VPN that is currently not running
+            .map(intf => intf.config.meta.intfName);
           break;
 
         case Mode.MODE_ROUTER:
           // only monitor lan in router mode
           monitoringIntfNames = Object.values(intfNameMap)
             .filter(intf => intf.config.meta.type === 'lan')
-            .map(intf => intf.config.meta.intfName)
+            .filter(intf => intf.state && intf.state.ip4)
+            .map(intf => intf.config.meta.intfName);
           break;
         default:
           // do nothing for other mode
           monitoringIntfNames = [];
       }
+      logicIntfNames = Object.values(intfNameMap)
+        .filter(intf => intf.config.meta.type === 'wan' || intf.config.meta.type === 'lan')
+        .filter(intf => intf.state && intf.state.ip4)
+        .map(intf => intf.config.meta.intfName);
 
       // Legacy code compatibility
       const updatedConfig = {
@@ -371,7 +378,8 @@ class FireRouter {
         }
       }
 
-      monitoringIntfNames = [ 'eth0', 'eth0:0' ]
+      monitoringIntfNames = [ 'eth0', 'eth0:0' ];
+      logicIntfNames = ['eth0', 'eth0:0'];
 
       wanIntfNames = ['eth0'];
       defaultWanIntfName = "eth0";
@@ -451,6 +459,10 @@ class FireRouter {
     return JSON.parse(JSON.stringify(intfNameMap))
   }
 
+  getLogicIntfNames() {
+    return JSON.parse(JSON.stringify(logicIntfNames));
+  }
+
   getMonitoringIntfNames() {
     return JSON.parse(JSON.stringify(monitoringIntfNames))
   }
@@ -514,34 +526,26 @@ class FireRouter {
     return this.sysNetworkInfo;
   }
 
-  async saveConfigHistory(config, mode) {
-    if (!config || !mode) {
-      log.error("Cannot save config, config or mode is not specified");
+  async saveConfigHistory(config) {
+    if (!config) {
+      log.error("Cannot save config, config is not specified");
       return;
     }
-    const key = `history:networkConfig:${mode}`;
+    const key = `history:networkConfig`;
     const time = Math.floor(Date.now() / 1000);
     await rclient.zaddAsync(key, time, JSON.stringify(config));
   }
 
-  async loadLastConfigFromHistory(mode) {
-    if (!mode) {
-      log.error("Cannot load last config, mode is not specified");
-      return null;
-    }
-    const history = await this.loadRecentConfigFromHistory(mode, 1);
+  async loadLastConfigFromHistory() {
+    const history = await this.loadRecentConfigFromHistory(1);
     if (history && history.length > 0)
       return history[0];
     else return null;
   }
 
-  async loadRecentConfigFromHistory(mode, count) {
-    if (!mode) {
-      log.error("Cannot load last config, mode is not specified");
-      return [];
-    }
+  async loadRecentConfigFromHistory(count) {
     count = count || 10;
-    const key = `history:networkConfig:${mode}`;
+    const key = `history:networkConfig`;
     const recentConfig = await rclient.zrevrangeAsync(key, 0, count, "withscores");
     const history = [];
     if (recentConfig && recentConfig.length > 0) {
@@ -561,33 +565,17 @@ class FireRouter {
     return history;
   }
 
-  async applyLastConfigForMode(mode) {
+  async applyNetworkConfig() {
     if (this.platform.isFireRouterManaged()) {
-      switch (mode) {
-        case Mode.MODE_AUTO_SPOOF: 
-        case Mode.MODE_ROUTER: {
-          let lastConfig = await this.loadLastConfigFromHistory(mode);
-          lastConfig = lastConfig && lastConfig.config;
-          if (!lastConfig) {
-            // load default config
-            if (mode === Mode.MODE_AUTO_SPOOF)
-              lastConfig = require('./default_setup_simple.json');
-            if (mode === Mode.MODE_ROUTER)
-              lastConfig = require('./default_setup_router.json');
-          }
-          await this.setConfig(lastConfig);
-          break;
-        }
-        default:
-          log.error("Unsupported mode for Firerouter: ", mode);
-      }
+      // firewalla do not change network config during mode switch if managed by firerouter
     } else {
       // red/blue, always apply network config for primary/secondary network no matter what the mode is
       const ModeManager = require('./ModeManager.js');
       await ModeManager.changeToAlternativeIpSubnet();
       await ModeManager.enableSecondaryInterface();
-      await pclient.publishAsync(Message.MSG_NETWORK_CHANGED, "");
     }
+    // publish message to trigger firerouter init
+    await pclient.publishAsync(Message.MSG_NETWORK_CHANGED, "");
   }
 }
 

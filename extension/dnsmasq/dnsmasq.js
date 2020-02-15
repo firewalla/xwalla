@@ -45,6 +45,7 @@ const { delay } = require('../../util/util.js');
 const { Rule, CHAINS } = require('../../net2/Iptables.js');
 
 const FILTER_DIR = f.getUserConfigFolder() + "/dnsmasq";
+const LOCAL_FILTER_DIR = f.getUserConfigFolder() + "/dnsmasq_local";
 const LEGACY_FILTER_DIR = f.getUserConfigFolder() + "/dns";
 const LOCAL_DOMAIN_FILE = FILTER_DIR + "/local_device_domain.conf";
 const LOCAL_DOMAIN_KEY = "local:device:domain"
@@ -470,25 +471,25 @@ module.exports = class DNSMASQ {
       }).join("\n");
       await fs.writeFileAsync(categoryBlcokMacSetFile, newData);
     } catch (err) {
-      if (err.code != "ENOENT") {
-        log.error("Failed to update category mact set entry file:", err);
-      }
+      log.error("Failed to update category mact set entry file:", err);
     } finally {
       this.workingInProgress = false;
     }
   }
 
   async updatePolicyCategoryFilterEntry(domains, options) {
-    log.debug("updatePolicyCategoryFilterEntry", domains, options)
+    log.debug("updatePolicyCategoryFilterEntry", domains, options);
+    options = options || {};
+    const category = options.category;
+    const categoryBlockDomainsFile = FILTER_DIR + `/${category}_block.conf`;
+    const categoryBlcokMacSetFile = FILTER_DIR + `/${category}_mac_set.conf`;
+    const fileExists = await fs.accessAsync(categoryBlcokMacSetFile, fs.constants.F_OK).then(() => true).catch(() => false);
+    if (!fileExists) return;
     while (this.workingInProgress) {
       log.info("deferred due to dnsmasq is working in progress")
       await delay(1000);  // try again later
     }
     this.workingInProgress = true;
-    options = options || {};
-    const category = options.category;
-    const categoryBlockDomainsFile = FILTER_DIR + `/${category}_block.conf`;
-    const categoryBlcokMacSetFile = FILTER_DIR + `/${category}_mac_set.conf`;
     let entry = "";
     for (const domain of domains) {
       entry += `address=/${domain}/${BLACK_HOLE_IP}$${category}_block\n`;
@@ -499,9 +500,7 @@ module.exports = class DNSMASQ {
       const data = await fs.readFileAsync(categoryBlcokMacSetFile, 'utf8');
       if (data.indexOf(`$${category}_block`) > -1) this.restartDnsmasq();
     } catch (err) {
-      if (err.code != 'ENOENT') {
-        log.error("Failed to update category entry into file:", err);
-      }
+      log.error("Failed to update category entry into file:", err);
     } finally {
       this.workingInProgress = false;
     }
@@ -615,6 +614,7 @@ module.exports = class DNSMASQ {
 
     try {
       await mkdirp(FILTER_DIR);
+      await mkdirp(LOCAL_FILTER_DIR);
     } catch (err) {
       log.error("Error when mkdir:", FILTER_DIR, err);
       return;
@@ -696,7 +696,9 @@ module.exports = class DNSMASQ {
     // then add new iptables rule for new vpn subnet. If newVpnSubnet is null, no new rule is added
     if (newVpnSubnet) {
       // newVpnSubnet is null means to delete previous nat rule. The previous vpn subnet should be kept in case of dnsmasq reloading
-      await iptables.dnsChangeAsync(newVpnSubnet, dns, 'vpn', true);
+      if (!platform.isFireRouterManaged())
+      // vpn network is a monitoring interface on firerouter managed platform
+        await iptables.dnsChangeAsync(newVpnSubnet, dns, 'vpn', true);
       this.vpnSubnet = newVpnSubnet;
     }
   }
@@ -734,7 +736,7 @@ module.exports = class DNSMASQ {
             .mth(ip6Subnets[i], null, 'src')
             .pam('-m set ! --match-set no_dns_caching_set src')
             .mth(53, null, 'dport')
-            .jmp(`DNAT --to-destination ${ip6Addrs[i]}:${MASQ_PORT}`);
+            .jmp(`DNAT --to-destination [${ip6Addrs[i]}]:${MASQ_PORT}`);
           const redirectUDP = redirectTCP.clone().pro('udp');
           await execAsync(redirectTCP.toCmd('-A'));
           await execAsync(redirectUDP.toCmd('-A'));
@@ -819,7 +821,7 @@ module.exports = class DNSMASQ {
     }
   }
 
-  checkIfRestartNeeded() {
+  async checkIfRestartNeeded() {
     const MINI_RESTART_INTERVAL = 10 // 10 seconds
 
     if (this.needRestart) {
@@ -827,7 +829,8 @@ module.exports = class DNSMASQ {
     }
 
     if (this.shouldStart && this.needRestart && (new Date() / 1000 - this.needRestart) > MINI_RESTART_INTERVAL) {
-      this.needRestart = null
+      this.needRestart = null;
+      if (!(await this.checkConfsChange())) return;
       this.rawRestart((err) => {
         if (err) {
           log.error("Failed to restart dnsmasq")
@@ -1398,6 +1401,8 @@ module.exports = class DNSMASQ {
       for (let dir of dirs) {
         await cleanDir(dir);
       }
+      log.info("clean up cleanUpLeftoverConfig");
+      await rclient.delAsync('dnsmasq:conf');
     } catch (err) {
       log.error("Failed to clean up leftover config", err);
     }
@@ -1479,5 +1484,25 @@ module.exports = class DNSMASQ {
       await fs.writeFileAsync(filePath, data);
       this.restartDnsmasq()
     }, cooldown)
+  }
+  async checkConfsChange() {
+    try {
+      const dnsmasqConfKey = "dnsmasq:conf";
+      let md5sumNow = '';
+      for (const confs of [`${FILTER_DIR}*`, resolvFile]) {
+        const { stdout } = await execAsync(`find ${confs} -type f | sort | xargs cat | md5sum | awk '{print $1}'`);
+        md5sumNow = md5sumNow + (stdout ? stdout.split('\n').join('') : '');
+      }
+      const md5sumBefore = await rclient.getAsync(dnsmasqConfKey);
+      log.info(`dnsmasq confs md5sum, before: ${md5sumBefore} now: ${md5sumNow}`)
+      if (md5sumNow != md5sumBefore) {
+        await rclient.setAsync(dnsmasqConfKey, md5sumNow);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      log.info(`Get dnsmasq confs md5summ error`, error)
+      return true;
+    }
   }
 };

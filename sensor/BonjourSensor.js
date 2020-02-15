@@ -62,6 +62,10 @@ class BonjourSensor extends Sensor {
         this.bonjourBrowserHTTP.stop();
       if (this.bonjour)
         this.bonjour.destroy();
+      // do not initialize bonjour if there is no interface with IP address
+      // otherwise dgram.addMembership will emit error and crash the process
+      if (sysManager.getMonitoringInterfaces().filter(i => i.ip_address).length == 0)
+        return;
       // create new bonjour listeners
       this.bonjour = Bonjour();
       this.bonjour._server.mdns.on('warning', (err) => log.warn("Warning on mdns server", err));
@@ -157,17 +161,10 @@ class BonjourSensor extends Sensor {
             resolve(null);
           } else {
             if (!mac) {
-              for (const intf of this.interfaces) {
-                const intfName = intf.name;
-                if (ipAddr === sysManager.myIp(intfName)) {
-                  resolve(sysManager.myMAC(intfName));
-                } else if (ipAddr === sysManager.myWifiIp(intfName)) {// DEPRECATING
-                  resolve(sysManager.myWifiMAC(intfName));
-                } else {
-                  log.error("Not able to find mac address for host:", ipAddr, mac);
-                  resolve(null);
-                }
-              }
+              const myMac = sysManager.myMACViaIP4(ipAddr) || null;
+              if (!myMac)
+                log.error("Not able to find mac address for host:", ipAddr, mac);
+              resolve(myMac);
             } else {
               ipMacCache[ipAddr] = { mac: mac, lastSeen: Date.now() / 1000 };
               resolve(mac);
@@ -181,12 +178,10 @@ class BonjourSensor extends Sensor {
         return null;
       })
       if (!mac) {
-        for (const intf of this.interfaces) {
-          const intfName = intf.name;
-          if (sysManager.myIp6(intfName) && sysManager.myIp6(intfName).includes(ipAddr)) {
-            mac = sysManager.myMAC(intfName);
-          }
-        }
+        const myMac = sysManager.myMACViaIP6(ipAddr) || null;
+        if (!myMac)
+          log.error("Not able to find mac address for host:", ipAddr, mac);
+        return myMac
       } else {
         ipMacCache[ipAddr] = { mac: mac, lastSeen: Date.now() / 1000 };
         return mac;

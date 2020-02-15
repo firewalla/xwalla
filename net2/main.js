@@ -184,6 +184,10 @@ async function run() {
   const firewallaConfig = fc.getConfig();
   sysManager.syncVersionUpdate();
 
+
+  const HostManager = require('./HostManager.js');
+  const hostManager= new HostManager("cli",'server','debug');
+
   const hl = require('../hook/HookLoader.js');
   hl.initHooks();
   hl.run();
@@ -207,25 +211,9 @@ async function run() {
   const bro = new BroDetect("bro_detector", firewallaConfig)
   bro.start()
 
-  var HostManager = require('./HostManager.js');
-  var hostManager= new HostManager("cli",'server','debug');
-
   // although they are not used here, it is still needed to create them
   const NetworkProfileManager = require('./NetworkProfileManager.js');
   const TagManager = require('./TagManager.js');
-
-  /* This is already done in ModeManager.apply().
-     Hopefully this will be wrapped in firerouter.init() and is no longer needed eventually
-  if (platform.getDHCPCapacity()) {
-    // always create the secondary interface
-    await ModeManager.enableSecondaryInterface()
-    const list = await d.discoverInterfacesAsync()
-    if (list && list.length >= 2) {
-      sysManager.update(null) // if new interface is found, update sysManager
-      await pclient.publishAsync("System:IPChange", "");
-    }
-  }
-  */
 
   let DNSMASQ = require('../extension/dnsmasq/dnsmasq.js');
   let dnsmasq = new DNSMASQ();
