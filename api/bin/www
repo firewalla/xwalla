@@ -20,7 +20,7 @@ process.title = "FireApi"
 process.setMaxListeners(0)
 require('events').EventEmitter.prototype._maxListeners = 100;
 
-let log = require("../../net2/logger.js")(__filename);
+const log = require("../../net2/logger.js")(__filename);
 
 log.info("+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++");
 log.info("API Starting ");
@@ -33,10 +33,12 @@ const sem = require('../../sensor/SensorEventManager.js').getInstance();
 
 const bone = require("../../lib/Bone.js");
 
-let f = require("../../net2/Firewalla.js");
+const f = require("../../net2/Firewalla.js");
 
 // api/main/monitor all depends on sysManager configuration
-let sysManager = require('../../net2/SysManager.js');
+const sysManager = require('../../net2/SysManager.js');
+
+const Mode = require('../../net2/Mode.js');
 
 log.info("Waiting for cloud token...");
 
@@ -58,7 +60,7 @@ function run0() {
   }
 }
 
-let i18n = require('i18n');
+const i18n = require('i18n');
 const rclient = require('../../util/redis_manager.js').getRedisClient()
 
 let language = 'en';
@@ -87,7 +89,6 @@ let http = require('http');
 let port = normalizePort(process.env.PORT || '8833');
 
 let server;
-let serverForLocalAPI;
 
 let portForLocalAPI = normalizePort('8834');
 
@@ -115,24 +116,28 @@ run();
 
 
 function runLocalAPI() {
-  let app2 = require('../app-local.js');
+  const app2 = require('../app-local.js');
   app2.set('port', portForLocalAPI);
 
-  /**
-   * Create HTTP server.
-   */
-
-  serverForLocalAPI = http.createServer(app2);
-
-  /**
-   * Listen on provided port, on all network interfaces.
-   */
-
   if(f.isProductionOrBetaOrAlpha()) {
-    serverForLocalAPI.listen(portForLocalAPI, 'localhost')
+    // only listen on localhost for non-dev environment
+    createServerAndListen(app2, 'localhost')
+  } else if (Mode.isRouterModeOn()) {
+    // don't listen on wan
+    createServerAndListen(app2, 'localhost')
+    sysManager.getMonitoringInterfaces().forEach(intf => {
+      createServerAndListen(app2, intf.ip_address)
+    })
   } else {
-    serverForLocalAPI.listen(portForLocalAPI)
+    createServerAndListen(app2, '0.0.0.0')
   }
+}
+
+function createServerAndListen(app, ip) {
+
+  const serverForLocalAPI = http.createServer(app);
+
+  serverForLocalAPI.listen(portForLocalAPI, ip)
 
   serverForLocalAPI.on('error', onError);
   serverForLocalAPI.on('listening', onListening);
